@@ -83,4 +83,38 @@ BatchECEFResult eci_to_ecef_batch(
     return result;
 }
 
+BatchECEFBuffer::Ptr eci_to_ecef_buffer(
+    const double* eci_x, const double* eci_y, const double* eci_z,
+    const double* eci_vx, const double* eci_vy, const double* eci_vz,
+    const double* jd_array,
+    size_t n
+) {
+    auto buf = std::make_shared<BatchECEFBuffer>(n);
+    double* x = buf->x();
+    double* y = buf->y();
+    double* z = buf->z();
+    double* vx = buf->vx();
+    double* vy = buf->vy();
+    double* vz = buf->vz();
+
+    for (size_t i = 0; i < n; ++i) {
+        double theta = greenwich_apparent_sidereal_time(jd_array[i]);
+        double ct = cos(theta);
+        double st = sin(theta);
+
+        double xi = eci_x[i], yi = eci_y[i], zi = eci_z[i];
+        double vxi = eci_vx[i], vyi = eci_vy[i], vzi = eci_vz[i];
+
+        x[i] = ct * xi + st * yi;
+        y[i] = -st * xi + ct * yi;
+        z[i] = zi;
+
+        vx[i] = ct * vxi + st * vyi + OMEGA_EARTH * y[i];
+        vy[i] = -st * vxi + ct * vyi - OMEGA_EARTH * x[i];
+        vz[i] = vzi;
+    }
+
+    return buf;
+}
+
 }

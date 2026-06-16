@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <memory>
 #include "sgp4_model.hpp"
 #include "sgp4_propagator.hpp"
 #include "wgs84_converter.hpp"
@@ -128,6 +129,116 @@ PYBIND11_MODULE(_sgp4_binding, m) {
     }, py::arg("x"), py::arg("y"), py::arg("z"),
        py::arg("vx"), py::arg("vy"), py::arg("vz"), py::arg("jd"),
        "Convert ECI coordinates to WGS84 ECEF");
+
+    py::class_<sgp4::BatchECEFBuffer, std::shared_ptr<sgp4::BatchECEFBuffer>>(
+        m, "BatchECEFBuffer",
+        "Batch ECEF coordinate buffer with shared memory management. "
+        "Numpy views reference the same underlying C++ memory, which is "
+        "automatically freed when all references are released.")
+        .def(py::init<>())
+        .def(py::init<size_t>(), py::arg("size"))
+        .def_property_readonly("size", &sgp4::BatchECEFBuffer::size)
+        .def_property_readonly("empty", &sgp4::BatchECEFBuffer::empty)
+        .def("clear", &sgp4::BatchECEFBuffer::clear, "Release all internal memory")
+        .def("resize", &sgp4::BatchECEFBuffer::resize, py::arg("size"),
+             "Resize the buffer (invalidates existing views)")
+        .def("to_numpy_dict", [](std::shared_ptr<sgp4::BatchECEFBuffer> self) {
+            size_t n = self->size();
+            py::dict result;
+            auto make_view = [&](const char* name, double* data) {
+                py::array_t<double> arr(
+                    py::array::ShapeContainer{n},
+                    py::array::StridesContainer{sizeof(double)},
+                    data,
+                    py::cast(self)
+                );
+                result[name] = arr;
+            };
+            make_view("x", self->x());
+            make_view("y", self->y());
+            make_view("z", self->z());
+            make_view("vx", self->vx());
+            make_view("vy", self->vy());
+            make_view("vz", self->vz());
+            return result;
+        }, "Return dict of numpy array views (zero-copy, base=this buffer)")
+        .def("get_x", [](std::shared_ptr<sgp4::BatchECEFBuffer> self) {
+            return py::array_t<double>(
+                py::array::ShapeContainer{self->size()},
+                py::array::StridesContainer{sizeof(double)},
+                self->x(),
+                py::cast(self)
+            );
+        }, "Zero-copy numpy view of X coordinates")
+        .def("get_y", [](std::shared_ptr<sgp4::BatchECEFBuffer> self) {
+            return py::array_t<double>(
+                py::array::ShapeContainer{self->size()},
+                py::array::StridesContainer{sizeof(double)},
+                self->y(),
+                py::cast(self)
+            );
+        }, "Zero-copy numpy view of Y coordinates")
+        .def("get_z", [](std::shared_ptr<sgp4::BatchECEFBuffer> self) {
+            return py::array_t<double>(
+                py::array::ShapeContainer{self->size()},
+                py::array::StridesContainer{sizeof(double)},
+                self->z(),
+                py::cast(self)
+            );
+        }, "Zero-copy numpy view of Z coordinates")
+        .def("get_vx", [](std::shared_ptr<sgp4::BatchECEFBuffer> self) {
+            return py::array_t<double>(
+                py::array::ShapeContainer{self->size()},
+                py::array::StridesContainer{sizeof(double)},
+                self->vx(),
+                py::cast(self)
+            );
+        }, "Zero-copy numpy view of X velocity")
+        .def("get_vy", [](std::shared_ptr<sgp4::BatchECEFBuffer> self) {
+            return py::array_t<double>(
+                py::array::ShapeContainer{self->size()},
+                py::array::StridesContainer{sizeof(double)},
+                self->vy(),
+                py::cast(self)
+            );
+        }, "Zero-copy numpy view of Y velocity")
+        .def("get_vz", [](std::shared_ptr<sgp4::BatchECEFBuffer> self) {
+            return py::array_t<double>(
+                py::array::ShapeContainer{self->size()},
+                py::array::StridesContainer{sizeof(double)},
+                self->vz(),
+                py::cast(self)
+            );
+        }, "Zero-copy numpy view of Z velocity")
+        .def("use_count", [](std::shared_ptr<sgp4::BatchECEFBuffer>& self) {
+            return self.use_count();
+        }, "Reference count of the underlying shared buffer (for debugging)");
+
+    m.def("eci_to_ecef_buffer", [](py::array_t<double, py::array::c_style | py::array::forcecast> eci_x_arr,
+                                    py::array_t<double, py::array::c_style | py::array::forcecast> eci_y_arr,
+                                    py::array_t<double, py::array::c_style | py::array::forcecast> eci_z_arr,
+                                    py::array_t<double, py::array::c_style | py::array::forcecast> eci_vx_arr,
+                                    py::array_t<double, py::array::c_style | py::array::forcecast> eci_vy_arr,
+                                    py::array_t<double, py::array::c_style | py::array::forcecast> eci_vz_arr,
+                                    py::array_t<double, py::array::c_style | py::array::forcecast> jd_arr) {
+        auto x_buf = eci_x_arr.unchecked<1>();
+        auto y_buf = eci_y_arr.unchecked<1>();
+        auto z_buf = eci_z_arr.unchecked<1>();
+        auto vx_buf = eci_vx_arr.unchecked<1>();
+        auto vy_buf = eci_vy_arr.unchecked<1>();
+        auto vz_buf = eci_vz_arr.unchecked<1>();
+        auto jd_buf = jd_arr.unchecked<1>();
+
+        size_t n = x_buf.shape(0);
+
+        return sgp4::eci_to_ecef_buffer(
+            x_buf.data(0), y_buf.data(0), z_buf.data(0),
+            vx_buf.data(0), vy_buf.data(0), vz_buf.data(0),
+            jd_buf.data(0), n
+        );
+    }, py::arg("eci_x"), py::arg("eci_y"), py::arg("eci_z"),
+       py::arg("eci_vx"), py::arg("eci_vy"), py::arg("eci_vz"), py::arg("jd_array"),
+       "Batch convert ECI to ECEF and return a shared BatchECEFBuffer (zero-copy views)");
 
     m.def("eci_to_ecef_batch_cpp", [](py::array_t<double, py::array::c_style | py::array::forcecast> eci_x_arr,
                                        py::array_t<double, py::array::c_style | py::array::forcecast> eci_y_arr,

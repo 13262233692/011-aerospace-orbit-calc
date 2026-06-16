@@ -1,23 +1,32 @@
 from sgp4.api import Satrec, WGS72, jday
 import math
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Iterator, Generator
 from datetime import datetime, timezone, timedelta
+import gc
 
 OMEGA_EARTH = 7.2921151467e-5
 
 _CPP_ACCEL_AVAILABLE = False
+_CPP_BUFFER_AVAILABLE = False
 try:
     from orbit_calc._sgp4_binding import eci_to_ecef_batch_cpp
     _CPP_ACCEL_AVAILABLE = True
 except ImportError:
     pass
 
+try:
+    from orbit_calc._sgp4_binding import BatchECEFBuffer, eci_to_ecef_buffer
+    _CPP_BUFFER_AVAILABLE = True
+except ImportError:
+    pass
+
 
 class SGP4Propagator:
-    def __init__(self, use_cpp_accel: bool = True):
+    def __init__(self, use_cpp_accel: bool = True, use_buffer: bool = True):
         self.gravity_model = WGS72
         self.use_cpp_accel = use_cpp_accel and _CPP_ACCEL_AVAILABLE
+        self.use_buffer = use_buffer and _CPP_BUFFER_AVAILABLE
 
     def parse_tle(self, line1: str, line2: str) -> Satrec:
         return Satrec.twoline2rv(line1, line2, self.gravity_model)
@@ -154,6 +163,24 @@ class SGP4Propagator:
         v_eci_valid = v_eci[valid_mask]
         ts_valid = ts_jd_array[valid_mask]
 
+        if self.use_buffer:
+            buf = eci_to_ecef_buffer(
+                r_eci_valid[:, 0], r_eci_valid[:, 1], r_eci_valid[:, 2],
+                v_eci_valid[:, 0], v_eci_valid[:, 1], v_eci_valid[:, 2],
+                ts_valid
+            )
+            data = buf.to_numpy_dict()
+            return {
+                "timestamps_jd": ts_valid,
+                "x": np.asarray(data['x']),
+                "y": np.asarray(data['y']),
+                "z": np.asarray(data['z']),
+                "vx": np.asarray(data['vx']),
+                "vy": np.asarray(data['vy']),
+                "vz": np.asarray(data['vz']),
+                "_buffer": buf,
+            }
+
         if self.use_cpp_accel:
             r_ecef, v_ecef = self._eci_to_ecef_cpp(r_eci_valid, v_eci_valid, ts_valid)
         else:
@@ -164,6 +191,80 @@ class SGP4Propagator:
             "x": r_ecef[:, 0], "y": r_ecef[:, 1], "z": r_ecef[:, 2],
             "vx": v_ecef[:, 0], "vy": v_ecef[:, 1], "vz": v_ecef[:, 2],
         }
+
+    def propagate_chunked(self, sat: Satrec, epochyr: int, epochdays: float,
+                          duration_days: int = 7, step_seconds: int = 1,
+                          chunk_seconds: int = 86400) -> Iterator[dict]:
+        if epochyr < 57:
+            year = 2000 + epochyr
+        else:
+            year = 1900 + epochyr
+
+        jd_epoch = self._year_day_to_jd(year, epochdays)
+
+        total_seconds = duration_days * 24 * 3600
+
+        for chunk_start in range(0, total_seconds + 1, chunk_seconds):
+            chunk_end = min(chunk_start + chunk_seconds, total_seconds)
+            chunk_n = (chunk_end - chunk_start) // step_seconds + 1
+
+            t_offsets = chunk_start + np.arange(chunk_n, dtype=np.float64) * step_seconds
+            ts_jd_chunk = jd_epoch + t_offsets / 86400.0
+            jd_chunk = np.floor(ts_jd_chunk)
+            fr_chunk = ts_jd_chunk - jd_chunk
+
+            e_array, r_eci, v_eci = sat.sgp4_array(jd_chunk, fr_chunk)
+
+            valid_mask = e_array == 0
+            r_eci_valid = r_eci[valid_mask]
+            v_eci_valid = v_eci[valid_mask]
+            ts_valid = ts_jd_chunk[valid_mask]
+
+            if self.use_buffer and _CPP_BUFFER_AVAILABLE:
+                buf = eci_to_ecef_buffer(
+                    r_eci_valid[:, 0], r_eci_valid[:, 1], r_eci_valid[:, 2],
+                    v_eci_valid[:, 0], v_eci_valid[:, 1], v_eci_valid[:, 2],
+                    ts_valid
+                )
+                data = buf.to_numpy_dict()
+                yield {
+                    "timestamps_jd": ts_valid,
+                    "x": np.asarray(data['x']),
+                    "y": np.asarray(data['y']),
+                    "z": np.asarray(data['z']),
+                    "vx": np.asarray(data['vx']),
+                    "vy": np.asarray(data['vy']),
+                    "vz": np.asarray(data['vz']),
+                    "_buffer": buf,
+                }
+            else:
+                if self.use_cpp_accel:
+                    r_ecef, v_ecef = self._eci_to_ecef_cpp(r_eci_valid, v_eci_valid, ts_valid)
+                else:
+                    r_ecef, v_ecef = self.eci_to_ecef_batch(r_eci_valid, v_eci_valid, ts_valid)
+
+                yield {
+                    "timestamps_jd": ts_valid,
+                    "x": r_ecef[:, 0], "y": r_ecef[:, 1], "z": r_ecef[:, 2],
+                    "vx": v_ecef[:, 0], "vy": v_ecef[:, 1], "vz": v_ecef[:, 2],
+                }
+
+    def propagate_constellation(self, sats: List[Tuple[str, Satrec]],
+                                epochyr: int, epochdays: float,
+                                duration_days: int = 7,
+                                step_seconds: int = 1,
+                                chunk_seconds: int = 86400,
+                                gc_interval: int = 10) -> Iterator[Tuple[str, dict]]:
+        count = 0
+        for sat_name, sat in sats:
+            for chunk in self.propagate_chunked(
+                sat, epochyr, epochdays, duration_days, step_seconds, chunk_seconds
+            ):
+                yield (sat_name, chunk)
+
+            count += 1
+            if count % gc_interval == 0:
+                gc.collect()
 
     def propagate_7days_eci(self, sat: Satrec, epochyr: int, epochdays: float,
                             step_seconds: int = 1) -> List[dict]:
