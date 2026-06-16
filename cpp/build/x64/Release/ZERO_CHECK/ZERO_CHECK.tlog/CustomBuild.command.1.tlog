@@ -1,0 +1,10 @@
+^D:\SOLO-13\011-AEROSPACE-ORBIT-CALC\CPP\BUILD\CMAKEFILES\A6D453F0871F426EE586287F329AC347\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/SOLO-13/011-aerospace-orbit-calc/cpp -BD:/SOLO-13/011-aerospace-orbit-calc/cpp/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/SOLO-13/011-aerospace-orbit-calc/cpp/build/sgp4_propagator.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

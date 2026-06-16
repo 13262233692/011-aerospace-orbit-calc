@@ -1,0 +1,10 @@
+^D:\SOLO-13\011-AEROSPACE-ORBIT-CALC\BUILD\TEMP.WIN-AMD64-CPYTHON-312\RELEASE\_SGP4_BINDING\CMAKEFILES\8C9253DEE7E816917B0D201D34DBD4C1\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/SOLO-13/011-aerospace-orbit-calc/cpp -BD:/SOLO-13/011-aerospace-orbit-calc/build/temp.win-amd64-cpython-312/Release/_sgp4_binding --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/SOLO-13/011-aerospace-orbit-calc/build/temp.win-amd64-cpython-312/Release/_sgp4_binding/sgp4_propagator.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

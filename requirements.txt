@@ -1,0 +1,5 @@
+confluent-kafka>=2.3
+psycopg2-binary>=2.9
+numpy>=1.24
+sgp4>=2.22
+pybind11>=2.11

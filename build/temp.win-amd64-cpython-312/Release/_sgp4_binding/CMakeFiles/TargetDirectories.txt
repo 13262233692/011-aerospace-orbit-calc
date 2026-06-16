@@ -1,0 +1,4 @@
+D:/SOLO-13/011-aerospace-orbit-calc/build/temp.win-amd64-cpython-312/Release/_sgp4_binding/CMakeFiles/sgp4_core.dir
+D:/SOLO-13/011-aerospace-orbit-calc/build/temp.win-amd64-cpython-312/Release/_sgp4_binding/CMakeFiles/_sgp4_binding.dir
+D:/SOLO-13/011-aerospace-orbit-calc/build/temp.win-amd64-cpython-312/Release/_sgp4_binding/CMakeFiles/ALL_BUILD.dir
+D:/SOLO-13/011-aerospace-orbit-calc/build/temp.win-amd64-cpython-312/Release/_sgp4_binding/CMakeFiles/ZERO_CHECK.dir

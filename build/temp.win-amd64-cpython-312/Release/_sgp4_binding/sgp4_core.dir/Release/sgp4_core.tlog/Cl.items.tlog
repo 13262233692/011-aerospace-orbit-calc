@@ -1,0 +1,4 @@
+D:\SOLO-13\011-aerospace-orbit-calc\cpp\src\sgp4_model.cpp;D:\SOLO-13\011-aerospace-orbit-calc\build\temp.win-amd64-cpython-312\Release\_sgp4_binding\sgp4_core.dir\Release\sgp4_model.obj
+D:\SOLO-13\011-aerospace-orbit-calc\cpp\src\sgp4_propagator.cpp;D:\SOLO-13\011-aerospace-orbit-calc\build\temp.win-amd64-cpython-312\Release\_sgp4_binding\sgp4_core.dir\Release\sgp4_propagator.obj
+D:\SOLO-13\011-aerospace-orbit-calc\cpp\src\wgs84_converter.cpp;D:\SOLO-13\011-aerospace-orbit-calc\build\temp.win-amd64-cpython-312\Release\_sgp4_binding\sgp4_core.dir\Release\wgs84_converter.obj
+D:\SOLO-13\011-aerospace-orbit-calc\cpp\src\batch_propagator.cpp;D:\SOLO-13\011-aerospace-orbit-calc\build\temp.win-amd64-cpython-312\Release\_sgp4_binding\sgp4_core.dir\Release\batch_propagator.obj

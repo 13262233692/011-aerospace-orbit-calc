@@ -1,0 +1,10 @@
+^D:\SOLO-13\011-AEROSPACE-ORBIT-CALC\CPP\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/SOLO-13/011-aerospace-orbit-calc/cpp -BD:/SOLO-13/011-aerospace-orbit-calc/build/temp.win-amd64-cpython-312/Release/_sgp4_binding --check-stamp-file D:/SOLO-13/011-aerospace-orbit-calc/build/temp.win-amd64-cpython-312/Release/_sgp4_binding/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

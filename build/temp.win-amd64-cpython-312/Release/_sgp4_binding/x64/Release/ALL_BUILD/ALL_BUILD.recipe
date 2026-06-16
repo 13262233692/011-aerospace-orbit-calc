@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <ProjectOutputs>
+    <ProjectOutput>
+      <FullPath>D:\SOLO-13\011-aerospace-orbit-calc\build\temp.win-amd64-cpython-312\Release\_sgp4_binding\x64\Release\ZERO_CHECK</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\SOLO-13\011-aerospace-orbit-calc\build\lib.win-amd64-cpython-312\_sgp4_binding.cp312-win_amd64.pyd</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\SOLO-13\011-aerospace-orbit-calc\build\temp.win-amd64-cpython-312\Release\_sgp4_binding\x64\Release\ALL_BUILD</FullPath>
+    </ProjectOutput>
+  </ProjectOutputs>
+  <ContentFiles />
+  <SatelliteDlls />
+  <NonRecipeFileRefs />
+</Project>
