@@ -6,6 +6,7 @@
 #include "sgp4_propagator.hpp"
 #include "wgs84_converter.hpp"
 #include "batch_propagator.hpp"
+#include "perturbation_engine.hpp"
 
 namespace py = pybind11;
 
@@ -278,4 +279,224 @@ PYBIND11_MODULE(_sgp4_binding, m) {
     m.def("propagate_7days", &sgp4::propagate_7days,
           py::arg("rec"), py::arg("step_seconds") = 1,
           "Propagate satellite orbit for 7 days at given step interval");
+
+    py::class_<sgp4::LockFreePerturbationEngine>(
+        m, "LockFreePerturbationEngine",
+        "Lock-free perturbation engine for atmospheric drag and solar radiation pressure. "
+        "Uses double-buffering with memory barriers to safely share real-time space "
+        "environment parameters between update threads and computation threads without locks.")
+        .def(py::init<>())
+        .def_property_readonly_static("PARAM_COUNT", [](py::object) {
+            return sgp4::LockFreePerturbationEngine::PARAM_COUNT;
+        })
+        .def("update_param", &sgp4::LockFreePerturbationEngine::update_param,
+             py::arg("index"), py::arg("value"),
+             "Update single parameter (thread-safe, lock-free)")
+        .def("update_all", [](sgp4::LockFreePerturbationEngine& self,
+                               py::array_t<double, py::array::c_style | py::array::forcecast> arr) {
+            auto buf = arr.unchecked<1>();
+            if (buf.shape(0) != sgp4::LockFreePerturbationEngine::PARAM_COUNT) {
+                throw std::runtime_error("Array must have " +
+                    std::to_string(sgp4::LockFreePerturbationEngine::PARAM_COUNT) + " elements");
+            }
+            self.update_all(buf.data(0));
+        }, py::arg("params"),
+           "Update all parameters from numpy array (thread-safe, lock-free)")
+        .def("get_param", &sgp4::LockFreePerturbationEngine::get_param,
+             py::arg("index"),
+             "Get single parameter value (thread-safe)")
+        .def("get_all", [](const sgp4::LockFreePerturbationEngine& self) {
+            py::array_t<double> arr(sgp4::LockFreePerturbationEngine::PARAM_COUNT);
+            auto buf = arr.mutable_unchecked<1>();
+            self.get_all(buf.mutable_data(0));
+            return arr;
+        }, "Get all parameters as numpy array (thread-safe)")
+        .def("sequence", &sgp4::LockFreePerturbationEngine::sequence,
+             "Current update sequence number")
+        .def("has_update", &sgp4::LockFreePerturbationEngine::has_update,
+             py::arg("last_seq"),
+             "Check if new data is available since last sequence number")
+        .def("apply_perturbation", [](sgp4::LockFreePerturbationEngine& self,
+                                        py::array_t<double, py::array::c_style> x_arr,
+                                        py::array_t<double, py::array::c_style> y_arr,
+                                        py::array_t<double, py::array::c_style> z_arr,
+                                        py::array_t<double, py::array::c_style> vx_arr,
+                                        py::array_t<double, py::array::c_style> vy_arr,
+                                        py::array_t<double, py::array::c_style> vz_arr,
+                                        double jd, double dt) {
+            auto x = x_arr.mutable_unchecked<1>();
+            auto y = y_arr.mutable_unchecked<1>();
+            auto z = z_arr.mutable_unchecked<1>();
+            auto vx = vx_arr.mutable_unchecked<1>();
+            auto vy = vy_arr.mutable_unchecked<1>();
+            auto vz = vz_arr.mutable_unchecked<1>();
+            if (x.shape(0) != 1 || y.shape(0) != 1 || z.shape(0) != 1 ||
+                vx.shape(0) != 1 || vy.shape(0) != 1 || vz.shape(0) != 1) {
+                throw std::runtime_error("All arrays must have exactly 1 element");
+            }
+            self.apply_perturbation(
+                x.mutable_data(0), y.mutable_data(0), z.mutable_data(0),
+                vx.mutable_data(0), vy.mutable_data(0), vz.mutable_data(0),
+                jd, dt
+            );
+        }, py::arg("x"), py::arg("y"), py::arg("z"),
+           py::arg("vx"), py::arg("vy"), py::arg("vz"),
+           py::arg("jd"), py::arg("dt"),
+           "Apply perturbation correction in-place using 1-element numpy arrays")
+        .def("apply_perturbation_single", [](const sgp4::LockFreePerturbationEngine& self,
+                                             double x, double y, double z,
+                                             double vx, double vy, double vz,
+                                             double jd, double dt) -> py::tuple {
+            double xo = x, yo = y, zo = z;
+            double vxo = vx, vyo = vy, vzo = vz;
+            self.apply_perturbation(&xo, &yo, &zo, &vxo, &vyo, &vzo, jd, dt);
+            return py::make_tuple(xo, yo, zo, vxo, vyo, vzo);
+        }, py::arg("x"), py::arg("y"), py::arg("z"),
+           py::arg("vx"), py::arg("vy"), py::arg("vz"),
+           py::arg("jd"), py::arg("dt"),
+           "Apply perturbation correction and return new values as tuple")
+        .def("apply_perturbation_batch", [](const sgp4::LockFreePerturbationEngine& self,
+                                             py::array_t<double> x_arr,
+                                             py::array_t<double> y_arr,
+                                             py::array_t<double> z_arr,
+                                             py::array_t<double> vx_arr,
+                                             py::array_t<double> vy_arr,
+                                             py::array_t<double> vz_arr,
+                                             py::array_t<double> jd_arr,
+                                             double step_sec) {
+            if (x_arr.ndim() != 1 || y_arr.ndim() != 1 || z_arr.ndim() != 1 ||
+                vx_arr.ndim() != 1 || vy_arr.ndim() != 1 || vz_arr.ndim() != 1 ||
+                jd_arr.ndim() != 1) {
+                throw std::runtime_error("All arrays must be 1-dimensional");
+            }
+            py::ssize_t n_signed = x_arr.shape(0);
+            if (y_arr.shape(0) != n_signed || z_arr.shape(0) != n_signed ||
+                vx_arr.shape(0) != n_signed || vy_arr.shape(0) != n_signed ||
+                vz_arr.shape(0) != n_signed || jd_arr.shape(0) != n_signed) {
+                throw std::runtime_error("All arrays must have the same size");
+            }
+            size_t n = static_cast<size_t>(n_signed);
+            if (n == 0) return;
+
+            auto x_buf = x_arr.request();
+            auto y_buf = y_arr.request();
+            auto z_buf = z_arr.request();
+            auto vx_buf = vx_arr.request();
+            auto vy_buf = vy_arr.request();
+            auto vz_buf = vz_arr.request();
+
+            std::vector<double> x_copy, y_copy, z_copy, vx_copy, vy_copy, vz_copy;
+            bool need_x = (x_buf.strides[0] != (py::ssize_t)sizeof(double));
+            bool need_y = (y_buf.strides[0] != (py::ssize_t)sizeof(double));
+            bool need_z = (z_buf.strides[0] != (py::ssize_t)sizeof(double));
+            bool need_vx = (vx_buf.strides[0] != (py::ssize_t)sizeof(double));
+            bool need_vy = (vy_buf.strides[0] != (py::ssize_t)sizeof(double));
+            bool need_vz = (vz_buf.strides[0] != (py::ssize_t)sizeof(double));
+
+            double* x_ptr = static_cast<double*>(x_buf.ptr);
+            double* y_ptr = static_cast<double*>(y_buf.ptr);
+            double* z_ptr = static_cast<double*>(z_buf.ptr);
+            double* vx_ptr = static_cast<double*>(vx_buf.ptr);
+            double* vy_ptr = static_cast<double*>(vy_buf.ptr);
+            double* vz_ptr = static_cast<double*>(vz_buf.ptr);
+
+            if (need_x) {
+                x_copy.resize(n);
+                double* src = x_ptr;
+                for (size_t i = 0; i < n; ++i) { x_copy[i] = src[i * (x_buf.strides[0] / sizeof(double))]; }
+                x_ptr = x_copy.data();
+            }
+            if (need_y) {
+                y_copy.resize(n);
+                double* src = y_ptr;
+                for (size_t i = 0; i < n; ++i) { y_copy[i] = src[i * (y_buf.strides[0] / sizeof(double))]; }
+                y_ptr = y_copy.data();
+            }
+            if (need_z) {
+                z_copy.resize(n);
+                double* src = z_ptr;
+                for (size_t i = 0; i < n; ++i) { z_copy[i] = src[i * (z_buf.strides[0] / sizeof(double))]; }
+                z_ptr = z_copy.data();
+            }
+            if (need_vx) {
+                vx_copy.resize(n);
+                double* src = vx_ptr;
+                for (size_t i = 0; i < n; ++i) { vx_copy[i] = src[i * (vx_buf.strides[0] / sizeof(double))]; }
+                vx_ptr = vx_copy.data();
+            }
+            if (need_vy) {
+                vy_copy.resize(n);
+                double* src = vy_ptr;
+                for (size_t i = 0; i < n; ++i) { vy_copy[i] = src[i * (vy_buf.strides[0] / sizeof(double))]; }
+                vy_ptr = vy_copy.data();
+            }
+            if (need_vz) {
+                vz_copy.resize(n);
+                double* src = vz_ptr;
+                for (size_t i = 0; i < n; ++i) { vz_copy[i] = src[i * (vz_buf.strides[0] / sizeof(double))]; }
+                vz_ptr = vz_copy.data();
+            }
+
+            auto jd_buf = jd_arr.request();
+            auto jd_buf_s = jd_arr.strides(0);
+            std::vector<double> jd_copy_storage;
+            const double* jd_ptr = static_cast<const double*>(jd_buf.ptr);
+            if (jd_buf_s != (py::ssize_t)sizeof(double)) {
+                jd_copy_storage.resize(n);
+                for (size_t i = 0; i < n; ++i) { jd_copy_storage[i] = jd_ptr[i * (jd_buf_s / sizeof(double))]; }
+                jd_ptr = jd_copy_storage.data();
+            }
+
+            self.apply_perturbation_batch(x_ptr, y_ptr, z_ptr, vx_ptr, vy_ptr, vz_ptr, jd_ptr, step_sec, n);
+
+            if (need_x) {
+                double* dst = static_cast<double*>(x_buf.ptr);
+                for (size_t i = 0; i < n; ++i) { dst[i * (x_buf.strides[0] / sizeof(double))] = x_copy[i]; }
+            }
+            if (need_y) {
+                double* dst = static_cast<double*>(y_buf.ptr);
+                for (size_t i = 0; i < n; ++i) { dst[i * (y_buf.strides[0] / sizeof(double))] = y_copy[i]; }
+            }
+            if (need_z) {
+                double* dst = static_cast<double*>(z_buf.ptr);
+                for (size_t i = 0; i < n; ++i) { dst[i * (z_buf.strides[0] / sizeof(double))] = z_copy[i]; }
+            }
+            if (need_vx) {
+                double* dst = static_cast<double*>(vx_buf.ptr);
+                for (size_t i = 0; i < n; ++i) { dst[i * (vx_buf.strides[0] / sizeof(double))] = vx_copy[i]; }
+            }
+            if (need_vy) {
+                double* dst = static_cast<double*>(vy_buf.ptr);
+                for (size_t i = 0; i < n; ++i) { dst[i * (vy_buf.strides[0] / sizeof(double))] = vy_copy[i]; }
+            }
+            if (need_vz) {
+                double* dst = static_cast<double*>(vz_buf.ptr);
+                for (size_t i = 0; i < n; ++i) { dst[i * (vz_buf.strides[0] / sizeof(double))] = vz_copy[i]; }
+            }
+        }, py::arg("x"), py::arg("y"), py::arg("z"),
+           py::arg("vx"), py::arg("vy"), py::arg("vz"),
+           py::arg("jd_array"), py::arg("step_sec"),
+           "Apply perturbation correction to batch of coordinates in-place (handles non-contiguous arrays)");
+
+    py::class_<sgp4::BatchPerturbationEngine,
+               std::shared_ptr<sgp4::BatchPerturbationEngine>>(
+        m, "BatchPerturbationEngine",
+        "Multi-satellite perturbation engine managing multiple LockFreePerturbationEngine instances. "
+        "Supports global environmental updates and per-satellite configuration.")
+        .def(py::init<>())
+        .def(py::init<size_t>(), py::arg("num_satellites"))
+        .def("__getitem__", [](sgp4::BatchPerturbationEngine& self, size_t index) -> sgp4::LockFreePerturbationEngine& {
+            if (index >= self.size()) {
+                throw py::index_error();
+            }
+            return self[index];
+        }, py::return_value_policy::reference_internal,
+           "Get satellite-specific perturbation engine by index")
+        .def_property_readonly("size", &sgp4::BatchPerturbationEngine::size,
+                               "Number of satellite engines")
+        .def("resize", &sgp4::BatchPerturbationEngine::resize, py::arg("new_size"),
+             "Resize the number of satellite engines")
+        .def("update_global_env", &sgp4::BatchPerturbationEngine::update_global_env,
+             py::arg("f10_7"), py::arg("f10_7_avg"), py::arg("kp"), py::arg("storm_level"),
+             "Update global space environment for all satellites (thread-safe)");
 }

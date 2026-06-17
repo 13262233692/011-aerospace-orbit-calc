@@ -4,11 +4,23 @@ import numpy as np
 from typing import List, Tuple, Optional, Iterator, Generator
 from datetime import datetime, timezone, timedelta
 import gc
+import logging
+
+from orbit_calc.space_environment import (
+    SpaceEnvironmentProvider, SpaceEnvironmentData
+)
+from orbit_calc.perturbations import (
+    CombinedPerturbation, AtmosphericDensityModel,
+    AtmosphericDragPerturbation, SolarRadiationPressurePerturbation
+)
+
+logger = logging.getLogger(__name__)
 
 OMEGA_EARTH = 7.2921151467e-5
 
 _CPP_ACCEL_AVAILABLE = False
 _CPP_BUFFER_AVAILABLE = False
+_CPP_PERTURBATION_AVAILABLE = False
 try:
     from orbit_calc._sgp4_binding import eci_to_ecef_batch_cpp
     _CPP_ACCEL_AVAILABLE = True
@@ -21,12 +33,80 @@ try:
 except ImportError:
     pass
 
+try:
+    from orbit_calc._sgp4_binding import (
+        LockFreePerturbationEngine, BatchPerturbationEngine
+    )
+    _CPP_PERTURBATION_AVAILABLE = True
+except ImportError:
+    pass
+
 
 class SGP4Propagator:
-    def __init__(self, use_cpp_accel: bool = True, use_buffer: bool = True):
+    def __init__(self, use_cpp_accel: bool = True, use_buffer: bool = True,
+                 enable_perturbation: bool = True,
+                 use_cpp_perturbation: bool = True,
+                 auto_env_subscribe: bool = True,
+                 area_to_mass: float = 0.01,
+                 Cd: float = 2.2, Cr: float = 1.0):
         self.gravity_model = WGS72
         self.use_cpp_accel = use_cpp_accel and _CPP_ACCEL_AVAILABLE
         self.use_buffer = use_buffer and _CPP_BUFFER_AVAILABLE
+        self.enable_perturbation = enable_perturbation
+        self.use_cpp_perturbation = use_cpp_perturbation and _CPP_PERTURBATION_AVAILABLE
+        self.area_to_mass = area_to_mass
+        self.Cd = Cd
+        self.Cr = Cr
+
+        self._cpp_pert_engine: Optional[LockFreePerturbationEngine] = None
+        self._py_pert_engine: Optional[CombinedPerturbation] = None
+        self._last_env_seq = 0
+
+        if enable_perturbation:
+            if self.use_cpp_perturbation:
+                self._cpp_pert_engine = LockFreePerturbationEngine()
+            else:
+                self._py_pert_engine = CombinedPerturbation()
+
+            if auto_env_subscribe:
+                try:
+                    env_provider = SpaceEnvironmentProvider()
+                    env_provider.add_listener(self._on_env_update)
+                    self._env_provider = env_provider
+                    self._on_env_update(env_provider.get_current())
+                except Exception as e:
+                    logger.warning(f"Space env subscription failed: {e}")
+                    self._env_provider = None
+
+    def _on_env_update(self, env: SpaceEnvironmentData):
+        params = np.array([
+            env.f10_7,
+            env.f10_7_avg,
+            env.kp,
+            env.kp_3h,
+            5.0e-12,
+            self.Cd,
+            self.Cr,
+            self.area_to_mass,
+            float(env.storm_level),
+            0.0,
+        ], dtype=np.float64)
+
+        if self._cpp_pert_engine is not None:
+            self._cpp_pert_engine.update_all(params)
+        elif self._py_pert_engine is not None:
+            from orbit_calc.space_environment import PerturbationParams
+            p = PerturbationParams(
+                timestamp=env.timestamp,
+                atmospheric_density=5.0e-12,
+                drag_coefficient=self.Cd,
+                srp_coefficient=self.Cr,
+                area_to_mass=self.area_to_mass,
+                scale_factor=1.0 + env.storm_level * 0.1,
+            )
+            self._py_pert_engine.update_params(p)
+
+        self._last_env_seq += 1
 
     def parse_tle(self, line1: str, line2: str) -> Satrec:
         return Satrec.twoline2rv(line1, line2, self.gravity_model)
@@ -34,6 +114,112 @@ class SGP4Propagator:
     def parse_tle_with_name(self, name: str, line1: str, line2: str) -> Tuple[str, Satrec]:
         sat = Satrec.twoline2rv(line1, line2, self.gravity_model)
         return (name, sat)
+
+    def apply_perturbation_correction(self, r_eci: np.ndarray, v_eci: np.ndarray,
+                                       jd_array: np.ndarray,
+                                       step_seconds: float = 1.0) -> None:
+        if not self.enable_perturbation:
+            return
+
+        n = len(r_eci)
+        if n == 0:
+            return
+
+        if self.use_cpp_perturbation and self._cpp_pert_engine is not None:
+            n = len(r_eci)
+            r_accum = np.zeros_like(r_eci)
+            v_accum = np.zeros_like(v_eci)
+
+            r_curr = r_eci[0].copy()
+            v_curr = v_eci[0].copy()
+
+            r_accum[0] = r_curr.copy()
+            v_accum[0] = v_curr.copy()
+
+            for i in range(1, n):
+                jd_curr = jd_array[i - 1]
+                x_s, y_s, z_s, vx_s, vy_s, vz_s = self._cpp_pert_engine.apply_perturbation_single(
+                    r_curr[0], r_curr[1], r_curr[2],
+                    v_curr[0], v_curr[1], v_curr[2],
+                    jd_curr, step_seconds
+                )
+                r_curr[0] = x_s + (r_eci[i, 0] - r_eci[i - 1, 0])
+                r_curr[1] = y_s + (r_eci[i, 1] - r_eci[i - 1, 1])
+                r_curr[2] = z_s + (r_eci[i, 2] - r_eci[i - 1, 2])
+                v_curr[0] = vx_s + (v_eci[i, 0] - v_eci[i - 1, 0])
+                v_curr[1] = vy_s + (v_eci[i, 1] - v_eci[i - 1, 1])
+                v_curr[2] = vz_s + (v_eci[i, 2] - v_eci[i - 1, 2])
+                r_accum[i] = r_curr.copy()
+                v_accum[i] = v_curr.copy()
+
+            np.copyto(r_eci, r_accum)
+            np.copyto(v_eci, v_accum)
+        elif self._py_pert_engine is not None:
+            env = self._env_provider.get_current() if self._env_provider else SpaceEnvironmentData(
+                timestamp=datetime.now(timezone.utc)
+            )
+            for i in range(n):
+                r = r_eci[i]
+                v = v_eci[i]
+                jd = jd_array[i]
+                dv = self._py_pert_engine.compute_velocity_correction(
+                    r, v, jd, env, step_seconds,
+                    self.area_to_mass, self.Cd, self.Cr
+                )
+                r_eci[i] += v * step_seconds + 0.5 * dv * step_seconds
+                v_eci[i] += dv
+        elif self._cpp_pert_engine is not None:
+            for i in range(n):
+                r = r_eci[i]
+                v = v_eci[i]
+                jd = jd_array[i]
+                new_vals = self._cpp_pert_engine.apply_perturbation_single(
+                    r[0], r[1], r[2], v[0], v[1], v[2], jd, step_seconds
+                )
+                r_eci[i, 0] = new_vals[0]
+                r_eci[i, 1] = new_vals[1]
+                r_eci[i, 2] = new_vals[2]
+                v_eci[i, 0] = new_vals[3]
+                v_eci[i, 1] = new_vals[4]
+                v_eci[i, 2] = new_vals[5]
+
+    def set_perturbation_params(self, f10_7: float = 150.0, f10_7_avg: float = 150.0,
+                                kp: float = 2.0, storm_level: float = 0.0,
+                                area_to_mass: Optional[float] = None,
+                                Cd: Optional[float] = None, Cr: Optional[float] = None):
+        if area_to_mass is not None:
+            self.area_to_mass = area_to_mass
+        if Cd is not None:
+            self.Cd = Cd
+        if Cr is not None:
+            self.Cr = Cr
+
+        if self._cpp_pert_engine is not None:
+            params = np.array([
+                f10_7, f10_7_avg, kp, kp, 5.0e-12,
+                self.Cd, self.Cr, self.area_to_mass,
+                storm_level, 0.0,
+            ], dtype=np.float64)
+            self._cpp_pert_engine.update_all(params)
+
+    def get_perturbation_params(self) -> np.ndarray:
+        if self._cpp_pert_engine is not None:
+            return self._cpp_pert_engine.get_all()
+        elif self._py_pert_engine is not None:
+            p = self._py_pert_engine.get_params()
+            return p.as_array()
+        return np.zeros(10)
+
+    @property
+    def perturbation_sequence(self) -> int:
+        if self._cpp_pert_engine is not None:
+            return int(self._cpp_pert_engine.sequence())
+        return self._last_env_seq
+
+    def has_perturbation_update(self, last_seq: int) -> bool:
+        if self._cpp_pert_engine is not None:
+            return self._cpp_pert_engine.has_update(last_seq)
+        return self._last_env_seq > last_seq
 
     def propagate_single(self, sat: Satrec, year: int, month: int,
                          day: int, hour: int, minute: int, second: float) -> dict:
@@ -163,6 +349,11 @@ class SGP4Propagator:
         v_eci_valid = v_eci[valid_mask]
         ts_valid = ts_jd_array[valid_mask]
 
+        if self.enable_perturbation:
+            self.apply_perturbation_correction(
+                r_eci_valid, v_eci_valid, ts_valid, step_seconds
+            )
+
         if self.use_buffer:
             buf = eci_to_ecef_buffer(
                 r_eci_valid[:, 0], r_eci_valid[:, 1], r_eci_valid[:, 2],
@@ -219,6 +410,11 @@ class SGP4Propagator:
             r_eci_valid = r_eci[valid_mask]
             v_eci_valid = v_eci[valid_mask]
             ts_valid = ts_jd_chunk[valid_mask]
+
+            if self.enable_perturbation:
+                self.apply_perturbation_correction(
+                    r_eci_valid, v_eci_valid, ts_valid, step_seconds
+                )
 
             if self.use_buffer and _CPP_BUFFER_AVAILABLE:
                 buf = eci_to_ecef_buffer(
